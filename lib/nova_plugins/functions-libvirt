@@ -15,18 +15,80 @@ set +o xtrace
 # if we should turn on massive libvirt debugging
 DEBUG_LIBVIRT=$(trueorfalse False $DEBUG_LIBVIRT)
 
+# if we want to install dependencies from git repos
+LIBVIRT_DIR="$DEST"/libvirt
+LIBVIRT_PY_DIR="$DEST"/libvirt-python
+QEMU_DIR="$DEST"/qemu
+
 # Installs required distro-specific libvirt packages.
 function install_libvirt {
-    if is_ubuntu; then
-        install_package qemu-kvm
-        install_package libvirt-bin
-        install_package python-libvirt
-        install_package python-guestfs
-    elif is_fedora || is_suse; then
-        install_package kvm
-        install_package libvirt
-        install_package libvirt-python
-        install_package python-libguestfs
+    if [[ -n "$QEMU_REPO" && -n "$QEMU_BRANCH" ]]; then
+        echo "Installing qemu dependencies"
+        if is_ubuntu; then
+            install_package libglib2.0-dev libpixman-1-dev
+        elif is_fedora || is_suse; then
+            echo "The qemu installation from repository for fedora/suse is not supported, yet"
+            die
+        fi
+            git_clone "$QEMU_REPO" "$QEMU_DIR" "$QEMU_BRANCH"
+            cd "$QEMU_DIR"
+            ./configure --target-list=x86_64-softmmu
+            make
+            sudo make install
+            cd "$DEST"
+    else
+        if is_ubuntu; then
+            install_package qemu-kvm
+        elif is_fedora || is_suse; then
+            install_package kvm
+        fi
+    fi
+
+    if [[ -n "$LIBVIRT_REPO" && -n "$LIBVIRT_BRANCH" ]]; then
+        echo "Installing libvirt dependencies"
+        if is_ubuntu; then
+            install_package libxml2-dev libgnutls-dev libyajl-dev
+            install_package libnl-dev pkg-config libdevmapper-dev
+            install_package libcurl4-gnutls-dev python-dev libpciaccess-dev
+            install_package libxml2-utils xsltproc automake autopoint
+            install_package libpciaccess-dev libtool
+            install_package w3c-dtd-xhtml gettext
+            install_package python-guestfs
+        elif is_fedora || is_suse; then
+            echo "The libvirt installation from repository for fedora/suse is not supported, yet"
+            die
+        fi
+
+        echo "Installing libvirt"
+        git_clone "$LIBVIRT_REPO" "$LIBVIRT_DIR" "$LIBVIRT_BRANCH"
+        cd "$LIBVIRT_DIR"
+        ./autogen.sh --system
+        make
+        sudo make install
+        sudo libvirtd -d
+        cd "$DEST"
+
+        if [[ -n "$LIBVIRT_PY_REPO" && -n "$LIBVIRT_PY_BRANCH" ]]; then
+            echo "Installing libvirt python bindings"
+            git_clone "$LIBVIRT_PY_REPO" "$LIBVIRT_PY_DIR" "$LIBVIRT_PY_BRANCH"
+            cd "$LIBVIRT_PY_DIR"
+            python setup.py build
+            sudo python setup.py install
+            cd "$DEST"
+        else
+            echo "Please set LIBVIRT_PY_REPO and LIBVIRT_PY_BRANCH"
+            die
+        fi
+    else
+        if is_ubuntu; then
+            install_package libvirt-bin
+            install_package python-libvirt
+            install_package python-guestfs
+        elif is_fedora || is_suse; then
+            install_package libvirt
+            install_package libvirt-python
+            install_package python-libguestfs
+        fi
     fi
 
     # Restart firewalld after install of libvirt to avoid a problem
@@ -57,11 +119,27 @@ cgroup_device_acl = [
 EOF
     fi
 
-    if is_ubuntu; then
-        LIBVIRT_DAEMON=libvirt-bin
-    else
+    if [[ -n "$LIBVIRT_REPO" ]]; then
         LIBVIRT_DAEMON=libvirtd
+    else
+        if is_ubuntu; then
+            LIBVIRT_DAEMON=libvirt-bin
+        else
+            LIBVIRT_DAEMON=libvirtd
+        fi
     fi
+
+    if is_ubuntu; then
+        cat <<EOF | sudo tee /etc/polkit-1/localauthority/50-local.d/50-libvirt-remote-access.pkla
+[libvirt Management Access]
+Identity=unix-group:$LIBVIRT_GROUP;unix-user:$STACK_USER
+Action=org.libvirt.unix.manage
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+EOF
+    fi
+
 
     if is_fedora || is_suse; then
         if is_fedora && [[ $DISTRO =~ (rhel6) || "$os_RELEASE" -le "17" ]]; then
@@ -133,7 +211,13 @@ EOF
     # libvirt detects various settings on startup, as we potentially changed
     # the system configuration (modules, filesystems), we need to restart
     # libvirt to detect those changes.
-    restart_service $LIBVIRT_DAEMON
+
+    if [[ -n "$LIBVIRT_REPO" ]]; then
+        sudo killall libvirtd
+        sudo libvirtd -d
+    else
+        restart_service $LIBVIRT_DAEMON
+    fi
 }
 
 

@@ -621,6 +621,7 @@ function exit_trap {
     # which currently is only to verbose logfile
     if [[ -n $jobs && -n "$LOGFILE" && "$VERBOSE" == "True" ]]; then
         echo "exit_trap: cleaning up child processes"
+        echo "jobs pendig: $jobs"
         kill 2>&1 $jobs
     fi
 
