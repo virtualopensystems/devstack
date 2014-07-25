@@ -15,18 +15,117 @@ set +o xtrace
 # if we should turn on massive libvirt debugging
 DEBUG_LIBVIRT=$(trueorfalse False $DEBUG_LIBVIRT)
 
-# Installs required distro-specific libvirt packages.
+# Variables needed to install qemu and libvirt from tar releases
+# QEMU is released as .tar.bz2, libvirt and libvirt-python-module use tar.gz
+QEMU_FILE=$(echo "$QEMU_URL" | awk -F / '{ print $NF }')
+QEMU_DIR="$DEST"/$(echo "$QEMU_FILE" | sed 's/\(.*\)\.\(.*\)\.\(.*\)/\1/g')
+LIBVIRT_FILE=$(echo "$LIBVIRT_URL" | awk -F / '{ print $NF }')
+LIBVIRT_DIR="$DEST"/$(echo "$LIBVIRT_FILE" | sed 's/\(.*\)\.\(.*\)\.\(.*\)/\1/g')
+LIBVIRT_PY_FILE=$(echo "$LIBVIRT_PY_URL" | awk -F / '{ print $NF }')
+LIBVIRT_PY_DIR="$DEST"/$(echo "$LIBVIRT_PY_FILE" | sed 's/\(.*\)\.\(.*\)\.\(.*\)/\1/g')
+
+# Performance optimization for make
+N_CORES=$(cat /proc/cpuinfo | grep cores -m 1 | awk -F " " '{print $4}')
+
+# Installs libvirt and its dependencies (qemu included).
+# If the {LIBVIRT,LIBVIRT_PY,QEMU}_URL variables are defined,
+# we compile and install them from the tar archives
+# linked in the variables.
+# If not, we install the distro-specific packages.
 function install_libvirt {
-    if is_ubuntu; then
-        install_package qemu-kvm
-        install_package libvirt-bin
-        install_package python-libvirt
-        install_package python-guestfs
-    elif is_fedora || is_suse; then
-        install_package kvm
-        install_package libvirt
-        install_package libvirt-python
-        install_package python-libguestfs
+    if [[ -n "$QEMU_URL" ]]; then
+        echo "Installing QEMU dependencies"
+        if is_ubuntu; then
+            sudo apt-get build-dep qemu -y
+        elif is_fedora || is_suse; then
+            sudo yum-builddep qemu -y
+        fi
+        if [[ ! -d "$QEMU_DIR" ]]; then
+            echo "Compiling QEMU from sources"
+            cd "$DEST"
+            wget "$QEMU_URL"
+            tar -xf "$QEMU_FILE"
+            cd "$QEMU_DIR"
+            ./configure --target-list=`uname -m`-softmmu --prefix="$DEST"
+            make -j"$N_CORES"
+            sudo make install
+            cd "$DEST"
+        else
+            echo "QEMU directory found, skipping compilation."
+        fi
+    else
+        if is_ubuntu; then
+            install_package qemu-kvm
+        elif is_fedora || is_suse; then
+            install_package kvm
+        fi
+    fi
+
+    if [[ -n "$LIBVIRT_URL" ]]; then
+        echo "Installing libvirt dependencies"
+        if is_ubuntu; then
+            sudo apt-get build-dep libvirt -y
+            install_package libvirt-dev python-guestfs
+        elif is_fedora || is_suse; then
+            sudo yum-builddep libvirt -y
+        fi
+        if [[ ! -d  "$LIBVIRT_DIR" ]]; then
+            echo "Compiling libvirt from sources"
+            cd "$DEST"
+            wget "$LIBVIRT_URL"
+            tar -xf "$LIBVIRT_FILE"
+            cd "$LIBVIRT_DIR"
+            ./configure --prefix="$DEST" --localstatedir=/var --libdir="$DEST"/lib --sysconfdir=/etc
+            make -j"$N_CORES"
+            echo "Installing libvirt"
+            sudo make install
+            if [[ ! -f /etc/init/libvirtd.conf ]]; then
+                sudo cp daemon/libvirtd.upstart /etc/init/libvirtd.conf
+                sudo sed -i "s/\/usr\/sbin/"$(echo $LIBVIRT_DIR | sed 's/\//\\\//g')"\/daemon/g" /etc/init/libvirtd.conf
+            fi
+            if [[ ! -f /usr/share/polkit-1/actions/org.libvirt.policy ]]; then
+                sudo cp daemon/libvirtd.policy /usr/share/polkit-1/actions/org.libvirt.policy
+            fi
+            cd "$DEST"
+            if [[ -n "$LIBVIRT_PY_URL" ]]; then
+                echo "Installing libvirt python bindings"
+                wget "$LIBVIRT_PY_URL"
+                tar -xf "$LIBVIRT_PY_FILE"
+                cd "$LIBVIRT_PY_DIR"
+                python setup.py build
+                sudo python setup.py install
+                cd "$DEST"
+            else
+                echo "Please set LIBVIRT_PY_URL"
+                die
+            fi
+        else
+            echo "libvirt directory found, skipping compilation."
+        fi
+    else
+        if is_ubuntu; then
+            install_package libvirt-bin
+            install_package python-libvirt
+            install_package python-guestfs
+        elif is_fedora || is_suse; then
+            install_package libvirt
+            install_package libvirt-python
+            install_package python-libguestfs
+        fi
+    fi
+
+    if [[ -n "$LIBVIRT_URL" || -n "$QEMU_URL" ]]; then
+        if grep --quiet PATH /etc/environment; then
+            sudo sed -i "s/PATH\=\"/PATH\=\"$(echo $DEST | sed 's/\//\\\//g')\/bin:/" /etc/environment
+        else
+            echo PATH="$DEST"/bin:"$PATH" | sudo tee -a /etc/environment
+        fi
+        if grep --quiet LD_LIBRARY_PATH /etc/environment; then
+            sudo sed -i "s/LD\_LIBRARY\_PATH\=\"/LD\_LIBRARY\_PATH\=\"$(echo $DEST | sed 's/\//\\\//g')\/lib:/" /etc/environment
+        else
+            echo LD_LIBRARY_PATH="$DEST"/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} | sudo tee -a /etc/environment
+        fi
+        source /etc/environment
     fi
 
     # Restart firewalld after install of libvirt to avoid a problem
@@ -57,10 +156,25 @@ cgroup_device_acl = [
 EOF
     fi
 
-    if is_ubuntu; then
-        LIBVIRT_DAEMON=libvirt-bin
-    else
+    if [[ -n "$LIBVIRT_URL" ]]; then
         LIBVIRT_DAEMON=libvirtd
+    else
+        if is_ubuntu; then
+            LIBVIRT_DAEMON=libvirt-bin
+        else
+            LIBVIRT_DAEMON=libvirtd
+        fi
+    fi
+
+    if is_ubuntu; then
+        cat <<EOF | sudo tee /etc/polkit-1/localauthority/50-local.d/50-libvirt-remote-access.pkla
+[libvirt Management Access]
+Identity=unix-group:$LIBVIRT_GROUP;unix-user:$STACK_USER
+Action=org.libvirt.unix.manage
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+EOF
     fi
 
     if is_fedora || is_suse; then
