@@ -17,7 +17,26 @@ DEBUG_LIBVIRT=$(trueorfalse False $DEBUG_LIBVIRT)
 
 # Installs required distro-specific libvirt packages.
 function install_libvirt {
-    if is_ubuntu; then
+    if [[ -n "$QEMU_VERSION" || -n "$LIBVIRT_VERSION" ]]; then
+        if [[ -n "$QEMU_VERSION" ]]; then
+            $TOP_DIR/tools/build_qemu.sh "$QEMU_VERSION"
+        fi
+        if [[ -n "$LIBVIRT_VERSION" ]]; then
+            $TOP_DIR/tools/build_libvirt.sh "$LIBVIRT_VERSION"
+        fi
+        # Adding binaries and libraries to the system paths
+        if grep --quiet " PATH\=" $HOME/.bashrc; then
+            sudo sed -i "s/PATH\=\"/PATH\=\"$(echo $DEST | sed 's/\//\\\//g')\/bin:/" $HOME/.bashrc
+        else
+            echo export PATH="$DEST"/bin:"$PATH" | tee -a $HOME/.bashrc
+        fi
+        if grep --quiet LD_LIBRARY_PATH $HOME/.bashrc; then
+             sudo sed -i "s/LD\_LIBRARY\_PATH\=\"/LD\_LIBRARY\_PATH\=\"$(echo $DEST | sed 's/\//\\\//g')\/lib:/" $HOME/.bashrc
+        else
+            echo export LD_LIBRARY_PATH="$DEST"/lib:"$LD_LIBRARY_PATH" | tee -a $HOME/.bashrc
+        fi
+        source $HOME/.bashrc
+    elif is_ubuntu; then
         install_package qemu-kvm
         install_package libvirt-bin
         install_package python-libvirt
@@ -57,7 +76,7 @@ cgroup_device_acl = [
 EOF
     fi
 
-    if is_ubuntu; then
+    if is_ubuntu && -z $LIBVIRT_VERSION; then
         LIBVIRT_DAEMON=libvirt-bin
     else
         LIBVIRT_DAEMON=libvirtd
