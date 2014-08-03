@@ -17,7 +17,9 @@ DEBUG_LIBVIRT=$(trueorfalse False $DEBUG_LIBVIRT)
 
 # Installs required distro-specific libvirt packages.
 function install_libvirt {
-    if is_ubuntu; then
+    if [[ -n "$QEMU_VERSION" && -n "$LIBVIRT_VERSION" ]]; then
+        $TOP_DIR/tools/build_qemu_libvirt.sh "$QEMU_VERSION" "$LIBVIRT_VERSION"
+    elif is_ubuntu; then
         install_package qemu-kvm
         install_package libvirt-bin
         install_package python-libvirt
@@ -45,10 +47,22 @@ cgroup_device_acl = [
 EOF
     fi
 
-    if is_ubuntu; then
+    if is_ubuntu && -z "$LIBVIRT_VERSION"; then
         LIBVIRT_DAEMON=libvirt-bin
     else
         LIBVIRT_DAEMON=libvirtd
+    fi
+
+# Polkit configurations
+    if is_ubuntu; then
+        cat <<EOF | sudo tee /etc/polkit-1/localauthority/50-local.d/50-libvirt-remote-access.pkla
+[libvirt Management Access]
+Identity=unix-user:$STACK_USER
+Action=org.libvirt.unix.manage
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+EOF
     fi
 
     if is_fedora || is_suse; then
